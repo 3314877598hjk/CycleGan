@@ -13,6 +13,9 @@ checkpoints/*/
 !checkpoints/
 
 # Datasets images (keep scripts, ignore images)
+datasets/*/train/
+datasets/*/test/
+datasets/*/val/
 datasets/*/trainA/
 datasets/*/trainB/
 datasets/*/testA/
@@ -25,6 +28,7 @@ wandb/
 *.tfevents.*
 events.out.*
 cycleGAN_loss.png
+results/
 
 # IDE
 .idea/

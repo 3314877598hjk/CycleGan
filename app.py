@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import collections
 import gc
+import inspect
+import os
 from dataclasses import dataclass, field
 
 import torch
@@ -11,22 +13,38 @@ from models import create_model
 from util import util
 
 
+def configure_localhost_proxy_bypass() -> None:
+    """Keep Gradio's localhost startup checks from going through a proxy."""
+    loopback_hosts = ["127.0.0.1", "localhost", "::1"]
+    for key in ("NO_PROXY", "no_proxy"):
+        existing = [item.strip() for item in os.environ.get(key, "").split(",") if item.strip()]
+        merged = existing + [host for host in loopback_hosts if host not in existing]
+        os.environ[key] = ",".join(merged)
+
+
+configure_localhost_proxy_bypass()
+
+
 TASKS = {
-    "Map -> Vector": {
-        "name": "map2vector_cyclegan",
+    "Map -> 地图渲染风格图": {
+        "name": "G1_edge_loss_lam002",
         "direction": "AtoB",
+        "no_attention": True,
     },
-    "Vector -> Map": {
-        "name": "map2vector_cyclegan",
+    "地图渲染风格图 -> Map": {
+        "name": "G1_edge_loss_lam002",
         "direction": "BtoA",
+        "no_attention": True,
     },
     "Horse -> Zebra": {
-        "name": "zebra2horse_cyclegan",
+        "name": "zebra_G0_baseline",
         "direction": "AtoB",
+        "no_attention": True,
     },
     "Zebra -> Horse": {
-        "name": "zebra2horse_cyclegan",
+        "name": "zebra_G0_baseline",
         "direction": "BtoA",
+        "no_attention": True,
     },
 }
 
@@ -58,7 +76,7 @@ class InferenceOptions:
     init_gain: float = 0.02
     load_iter: int = 0
     continue_train: bool = False
-    no_attention: bool = False  # existing checkpoints were trained with attention enabled
+    no_attention: bool = False
     gpu_ids: list[int] = field(default_factory=list)
     device: torch.device = field(init=False)
 
@@ -96,7 +114,11 @@ class LRUModelCache:
                 torch.cuda.empty_cache()
 
         cfg = TASKS[task_name]
-        opt = InferenceOptions(cfg["name"], cfg["direction"])
+        opt = InferenceOptions(
+            name=cfg["name"],
+            direction=cfg["direction"],
+            no_attention=cfg.get("no_attention", False),
+        )
         model = create_model(opt)
         model.setup(opt)
         model.eval()
@@ -111,6 +133,48 @@ model_manager = LRUModelCache(max_capacity=1)
 def load_model(task_name: str):
     return model_manager.get(task_name)
 
+
+def accepts_parameter(callable_obj, parameter_name: str) -> bool:
+    return parameter_name in inspect.signature(callable_obj).parameters
+
+
+DEMO_TITLE = "基于改进 CycleGAN 的无配对图像翻译演示系统"
+DEMO_DESCRIPTION = (
+    "本系统基于 CycleGAN 框架，集成了自注意力模块（Self-Attention）与 Sobel 边缘一致性损失，"
+    "支持多任务切换与 LRU 显存调度。当前支持地图矢量化与马斑马风格迁移任务。\n\n"
+    "Unpaired image-to-image translation demo with self-attention generator and edge consistency loss. "
+    "Supports multi-task LRU model caching for efficient GPU memory management."
+)
+PREVIEW_HEIGHT = 560
+DEMO_CSS = """
+.gradio-container {
+    max-width: 1840px !important;
+}
+
+#preview-row {
+    gap: 18px;
+}
+
+.preview-column {
+    min-width: 360px !important;
+}
+
+.preview-image img,
+.preview-image canvas {
+    object-fit: contain !important;
+}
+
+#button-row button {
+    min-height: 42px;
+    font-weight: 600;
+}
+
+@media (max-width: 900px) {
+    .preview-column {
+        min-width: 100% !important;
+    }
+}
+"""
 
 transform = transforms.Compose(
     [
@@ -154,27 +218,65 @@ def build_demo():
             "then try again. Suggested packages: gradio, setuptools."
         ) from exc
 
-    return gr.Interface(
-        fn=inference,
-        inputs=[
-            gr.Image(type="pil", label="输入图像 / Input Image"),
-            gr.Dropdown(
-                choices=list(TASKS.keys()),
-                value="Map -> Vector",
-                label="翻译任务 / Translation Task",
-            ),
-        ],
-        outputs=gr.Image(type="numpy", label="输出图像 / Output Image"),
-        title="基于改进 CycleGAN 的无配对图像翻译演示系统",
-        description=(
-            "本系统基于 CycleGAN 框架，集成了自注意力模块（Self-Attention）与 Sobel 边缘一致性损失，"
-            "支持多任务切换与 LRU 显存调度。当前支持地图矢量化与马斑马风格迁移任务。\n\n"
-            "Unpaired image-to-image translation demo with self-attention generator and edge consistency loss. "
-            "Supports multi-task LRU model caching for efficient GPU memory management."
-        ),
-    )
+    blocks_kwargs = {"title": DEMO_TITLE}
+    if accepts_parameter(gr.Blocks, "css"):
+        blocks_kwargs["css"] = DEMO_CSS
+    if accepts_parameter(gr.Blocks, "fill_width"):
+        blocks_kwargs["fill_width"] = True
+
+    with gr.Blocks(**blocks_kwargs) as demo:
+        gr.Markdown(f"# {DEMO_TITLE}")
+        gr.Markdown(DEMO_DESCRIPTION)
+
+        with gr.Row(equal_height=True, elem_id="preview-row"):
+            with gr.Column(scale=1, min_width=360, elem_classes=["preview-column"]):
+                input_image = gr.Image(
+                    type="pil",
+                    label="输入图像 / Input Image",
+                    height=PREVIEW_HEIGHT,
+                    elem_classes=["preview-image"],
+                )
+            with gr.Column(scale=1, min_width=360, elem_classes=["preview-column"]):
+                output_image = gr.Image(
+                    type="numpy",
+                    label="输出图像 / Output Image",
+                    height=PREVIEW_HEIGHT,
+                    interactive=False,
+                    elem_classes=["preview-image"],
+                )
+
+        task_name = gr.Dropdown(
+            choices=list(TASKS.keys()),
+            value="Map -> 地图渲染风格图",
+            label="翻译任务 / Translation Task",
+        )
+
+        with gr.Row(elem_id="button-row"):
+            clear_button = gr.Button("Clear")
+            submit_button = gr.Button("Submit", variant="primary")
+
+        submit_button.click(
+            fn=inference,
+            inputs=[input_image, task_name],
+            outputs=output_image,
+        )
+        clear_button.click(
+            fn=lambda: (None, None),
+            inputs=None,
+            outputs=[input_image, output_image],
+            queue=False,
+        )
+
+    return demo
+
+
+def launch_demo(demo) -> None:
+    launch_kwargs = {"share": False}
+    if accepts_parameter(demo.launch, "css"):
+        launch_kwargs["css"] = DEMO_CSS
+    demo.launch(**launch_kwargs)
 
 
 if __name__ == "__main__":
     demo = build_demo()
-    demo.launch(share=False)
+    launch_demo(demo)
